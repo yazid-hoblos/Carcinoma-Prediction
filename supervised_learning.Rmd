@@ -1,0 +1,929 @@
+---
+title: "HPC Prediction -- Supervised Learning Applications"
+author: "Yazid Hoblos"
+date: '2022-11-12'
+output: html_document
+---
+
+```{r}
+knitr :: opts_chunk$set(warning=FALSE)
+```
+```{r}
+knitr::opts_chunk$set(error=TRUE)
+```
+
+This dataset is a microarray that consists of non-normalized genes expression for 357 patients, extensively curated from 30.000 studies from the Gene Expression Omnibus (GEO).
+The cases fall within 1 of 2 classes : normal/HCC (Hepatocellular Carcinoma).
+
+```{r}
+library(dplyr)
+library(leaps)
+library(MASS)
+library(caret)
+library(ggplot2)
+library(pROC)
+df = read.csv("Liver cancer.csv")
+View(df)
+```
+
+A quick inspection of the data shows that the numbers of normal and HCC patients are almost the same.
+
+```{r}
+df %>% ggplot()+
+  geom_bar(aes(type,fill=type))
+```
+
+I. Normalization
+
+#Using the standardization technique 
+```{r}
+df_S = df
+df_S[3:ncol(df_S)] <-  scale(df_S[3:ncol(df_S)],center = TRUE, scale = TRUE)
+```
+
+The regular standardization resulting in a mean of 0 and standard deviation of 1 is first considered.
+
+#Using the max-min technique
+```{r}
+df_M = df[1:2]
+normalize <- function(x, na.rm = TRUE) {
+    return((x- min(x)) /(max(x)-min(x)))
+}
+
+df_M [3:ncol(df)] = lapply(df[3:ncol(df)], normalize)
+```
+
+The min-max technique will make all values between 0 and 1, in other words, it suppresses all the values towards the mean and it is not very efficient when dealing with outliers.
+The robust scaling algorithm offers an alternative to better deal with outliers without losing them.
+
+#Using the robust scaling technique 
+```{r}
+df_R = df[1:2]
+robust_scalar<- function(x){(x- median(x)) /(quantile(x,probs = .75)-quantile(x,probs = .25))}
+df_R[3:ncol(df)] = lapply(df[3:ncol(df)], robust_scalar)
+```
+
+The summaries below show the changes in the data patterns after the application of the normalization techniques (mean=0,median=0,min=0 for df_S,df_R,and df_M respectively). Further investigation of the effects of these different types of normalization will be done in the next section.
+
+```{r}
+summary(df[1:10])
+summary(df_S[1:10])
+summary(df_M[1:10])
+summary(df_R[1:10])
+```
+
+II. Genes selection & Logistic regression application
+
+Genes will be selected based on their variance distribution, based on the fact that the considered cancer is expected to result in a deviated from normal expression for some genes. The set of genes with the highest variance will be selected first for inspection of potential correlations and patterns. To this end, the distribution of the variances and the effect of the different types of normalization on this distribution will be investigated.
+
+Note that over the whole upcoming section var will refer to the overall variance, while var1 and var2 will refer to the variance over the HCC cases and normal cases respectively.
+
+1. Using the original dataset
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df)){
+  var[i] = var(df[,i]) #overall variance
+  var1[i] = var(df[1:181,i]) #variance over HCC cases
+  var2[i] = var(df[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+v=cbind(var,var1,var2)
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var),fill='blue',alpha=0.4)+
+  geom_density(aes(var1),fill='red',alpha=0.4)+
+  geom_density(aes(var2),fill='green',alpha=0.4)
+
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var),fill='blue')
+as.data.frame(v) %>% ggplot()+
+   geom_density(aes(var1),fill='red')
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var2),fill='green')
+max=0
+for (i in var){
+  if(i>max){
+    max=i
+  }
+}
+print(max)
+```
+
+It is not enough to only consider the overall variance, because as will be clarified with further examination some of the genes with high variance might be highly variating among both the normal and HCC cases, and thus their variance is not dependent on the HCC itself but on other factors that might be affecting some of both the normal and HCC cases. That is why it could be hypothesized that it is important to investigate the variance over the HCC cases and normal cases alone.  
+
+Generally speaking, normalizing the data (i.e roughly speaking scaling it to some common frame) is expected to allow for better understanding of the interrelations between the genes and the selection of the best genes to be included in the model. Which of the considered normalization techniques represent the optimal choice remains to be investigated.
+
+```{r}
+plot(var1~var2)
+```
+
+
+```{r}
+boxplot(v[,1:3],col=c('blue','red','green'),names=c('overall var','HCC var', 'Normal var'))
+as.data.frame(v) %>% ggplot()+
+  geom_boxplot(aes(var),fill='blue')+
+  geom_boxplot(aes(var1),fill='red')+
+  geom_boxplot(aes(var2),fill='green')
+```
+
+The density plots show that the 3 variance patterns are quite similar, with most variance values between lying 0 and 1, and the max variance value is shown to be 11.14. Most of the genes expression are shown to have low variance across all cases, while some are shown to be highly expressed in the HCC cases only, and a handful of others are not as clearly distributed.
+
+```{r}
+count=0
+for (i in 3:ncol(df)){
+  if(var(df[i])>6){
+    count=count+1
+  }
+}
+count
+```
+
+A simple approach for genes selection would be to consider the genes with overall high variance. 27 genes are found to have variance greater than 6, and examining these values shows that their variability majorly stems from the HCC cases majorly (check the values below), and not the normal cases, which reflects the fact that these are some of the genes whose expression is likely to be distorted in HCC patients. The high variation of the expression of these genes among the HCC cases might stem from the existence of different subtypes of HCC, or the fact that the considered cases might be in different stages of their cancer. Being able to find some genes with low variance among the HCC cases and the normal cases alone, but overall high variance is expected to offer better seperation. Those genes investigation will be left for later on.
+
+```{r}
+for (i in 3:ncol(df)){
+  if(var(df[i])>6){
+  print(colnames(df)[i])
+  print(var[i])
+  print(var1[i])
+  print(var2[i])
+  print("")
+  }
+}
+```
+
+The 27 genes with variance > 6 will be taken into consideration, and a mutated dataset containing only them will be created.
+
+```{r}
+mut_df=df[1:2]
+current=3
+for (i in 3:ncol(df)){
+  if(var(df[i])>6){
+    mut_df=cbind(mut_df,df[,i])
+    colnames(mut_df)[current]=colnames(df[i])
+      current=current+1
+  }
+}
+ncol(mut_df)
+```
+
+The previous observation concerning the variability of the genes with highest variance being caused by the HCC cases majorly can be confirmed using the density plots, which also offers a better understanding of the variability of these genes.
+
+One interesting pattern revealed by these plots, is that for most of the selected genes, the expression for the normal cases is highly concentrated is a small range of values (be it high or low), except for small disturbances preventing the almost perfect separation which would have been reached had it been the case that the expression of those genes for normal cases was completely bounded within a small range. This pattern can specially be seen in the 4th and 5th plots.
+
+```{r}
+for(i in 3:29){
+  print(mut_df %>% ggplot()+
+   geom_density(aes(mut_df[,i],group=type,fill=type,alpha=0.5))+
+    labs(y='density',x=colnames(df)[i]) )
+}
+```
+
+Potential correlations between the selected genes are next considered. And it can be notices that linear and non-linear correlations exist. These correlations may negatively affect the logistic regression model if not dealt with, thus suggesting the use of a penalized model (such as lasso), which will be able to select the genes of highest importance given the whole genes set as well. However, the application of LASSO will be postponed for later on.
+
+```{r}
+pairs(mut_df[3:20])
+```
+
+```{r}
+pairs(mut_df[21:29])
+```
+Next, a logistic regression model will be created using the muatted dataset.
+
+```{r}
+mut_df$type = as.factor(mut_df$type)
+unique(mut_df$type)
+model1 = glm(type~.,mut_df[-1],family=binomial())
+summary(model1)
+```
+
+A warning was given that some fitted probabilities were very close to 0 or 1. This does not seem to be due to any particular flaws in the model, yet it seems that the chosen dataset offers the potential for very good HCC predictions. 
+
+Building a model using these chosen genes is shown to be already good (based on the residual deviance with respect to the null deviance, in addition to the AIC and Fischer scores). Yet, it can be seen from the pairs that some genes are correlated and should be dealt with. Also, the density plots show that for the 27th gene the variability is seen both in normal and HCC cases, and thus it is not a good predictor for HCC. So it is to be expected that simply removing the 27th gene and the genes showing high correlation with other genes should increase the fitness of the model, which can be reflected by the lower AIC value below.
+
+As shown below, this can be seen to be the case. In addition, these deletions are shown to generally decrease the standard error values and increase the number of significant genes.
+
+```{r}
+mut_df = mut_df[-29]
+mut_df = mut_df[-24]
+mut_df = mut_df[-22]
+mut_df = mut_df[-21]
+mut_df=mut_df[-3]
+mut_df$type = as.factor(mut_df$type)
+model2 = glm(type~.,mut_df[-1],family=binomial())
+summary(model2)
+```
+The number of genes can be further reduced to only those significantly contributing to the model.
+
+```{r}
+model2 = glm(type~X205695_at +X207608_x_at+X206727_at+X214677_x_at+X206561_s_at+X220491_at+X209614_at+X207201_s_at+X206727_at,mut_df[-1],family=binomial())
+summary(model2)
+```
+Finally, by just following these simple steps, a very good model was built just using only 5 genes expression for HCC prediction.
+
+```{r}
+model3 = glm(type~X205695_at +X214677_x_at+X209614_at+X206561_s_at+X220491_at,mut_df[-1],family=binomial())
+summary(model3)
+```
+Plotting the distributions of the 5 selected genes shows that they all offer relatively good seperation fo the normal cases from the HCC ones.
+
+```{r}
+mut_df %>% ggplot()+
+   geom_density(aes(mut_df$X205695_at,group=type,fill=type,alpha=0.5))
+mut_df %>% ggplot()+
+   geom_density(aes(mut_df$X214677_x_at,group=type,fill=type,alpha=0.5))
+mut_df %>% ggplot()+
+   geom_density(aes(mut_df$X209614_at,group=type,fill=type,alpha=0.5))
+mut_df %>% ggplot()+
+   geom_density(aes(mut_df$X220491_at,group=type,fill=type,alpha=0.5))
+mut_df %>% ggplot()+
+   geom_density(aes(mut_df$X206561_s_at,group=type,fill=type,alpha=0.5))
+```
+
+
+The training accuracy of this last model with only 5 genes is shown to be in the order of 96.5%.
+
+```{r}
+library(caret)
+probs <- predict(model3, type = "response")
+contrasts(mut_df$type)
+
+pred <- rep("HCC",nrow(mut_df))
+pred[probs > 0.5] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(mut_df$type))
+t
+```
+
+This model accuracy will be also tested on unseen samples.
+
+
+```{r}
+mut_df = mut_df%>%
+  mutate(id=row_number())
+
+set.seed(123,sample.kind='Rejection') 
+
+training = mut_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(mut_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+model3 = glm(type~.,training[-1],family=binomial())
+
+probs <- predict(model3, newdata = testing,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs > 0.5] <- "normal"
+
+t = confusionMatrix(as.factor(pred), reference=as.factor(testing$type))
+t
+mut_df=mut_df[-ncol(mut_df)]
+```
+
+The testing accuracy of the model is already relatively good (not deviating much from the training accuracy).
+
+
+# # # #  Notes before proceeding 
+
+A) It can be shown that the application of the previously considered normalization technique on the mutated dataset will not change the values distribution and will not affect the model accuracy, nor which genes are significant, but it will only change the coefficients values and make them more interpretable (related to each other meaningfully). This effect is shown only for below for 2 of the normalization techniques.
+
+```{r}
+mut_df_M = mut_df[1:2]
+mut_df_M [3:ncol(mut_df)] = lapply(mut_df[3:ncol(mut_df)], normalize)
+ncol(mut_df_M)
+```
+
+```{r}
+for(i in 3:24){
+  print(mut_df_M %>% ggplot()+
+   geom_density(aes(mut_df_M[,i],group=type,fill=type,alpha=0.5))+
+    labs(y='density',x=colnames(mut_df_M)[i]) )
+}
+```
+
+```{r}
+mut_df_M$type = as.factor(mut_df_M$type)
+model = glm(type~.,mut_df_M[-1],family=binomial())
+summary(model)
+```
+It can be seen how different the coefficients are in the min-max normalized case compared to the original dataset. These new values better reflect how the different genes expressions affect the model compared to each other.
+
+```{r}
+mut_df_S=mut_df
+mut_df_S[3:ncol(mut_df_S)] <-  scale(mut_df_S[3:ncol(mut_df_S)],center = TRUE, scale = TRUE)
+```
+
+
+```{r}
+for(i in 3:24){
+  print(mut_df_S %>% ggplot()+
+   geom_density(aes(mut_df_S[,i],group=type,fill=type,alpha=0.5))+
+    labs(y='density',x=i) )
+}
+```
+
+```{r}
+mut_df_S$type = as.factor(mut_df_S$type)
+model = glm(type~.,mut_df_S[-1],family=binomial())
+summary(model)
+```
+B) To ensure the validity of the results reached before, it is important to show that not all genes in the dataset are capable of offering good predictions. This can be simply shown by taking a random set of genes and examining how good the model it will result in will be. The AIC is shown to be very high compared to the model of before.
+
+```{r}
+df$type=as.factor(df$type)
+mod = glm(df$type~.,df[-1][1:10],family=binomial())
+summary(mod)
+```
+
+C) A problem is faced when including more than around 50 genes in the model. Under this condition, the model is shown not to converge.
+This means that the maximum likelihood function is unable to be maximized due to its lack of any maximum. In practical terms, this is due to perfect or almost perfect seperation, and to better understand the problem, it can be replicated by building a model only using the id of the rows will result in this convergence issue, since all HCC cases will have an id value smaller than a certain value, while all normal cases will have values above it (due to the fact that the HCC and normal cases are clustered each together). In this case, the training accuracy will be 1 (perfect seperation), yet the testing accuracy will be that of the model including the last feature before which the maximum likelihood function seized to converge. In this case, the testing accuracy turned out to be around 0.88, which again reflects that as noticed before where fitted probabilities so close to 0 and 1 were found, this dataset is very good for this cancer type classification, so that even taking a random number of (many) genes will result in a relatively good model. The main aim as such would be to reach an optimal model using a minimal number of genes, as was achieved before with the model only including 5 genes.  
+
+```{r}
+df$type=as.factor(df$type)
+m = glm(df$type~.,df[-1][1:80],family=binomial())
+summary(m)
+```
+
+```{r}
+df = df%>%
+  mutate(id=row_number())
+
+df$type=as.factor(df$type)
+mod = glm(df$type~.,df[-1][ncol(df)-1],family=binomial())
+summary(mod)
+df = df[-ncol(df)]
+```
+
+```{r}
+probs <- predict(m, type = "response")
+contrasts(df$type)
+
+pred <- rep("HCC",nrow(df))
+pred[probs > 0.5] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(mut_df$type))
+t
+```
+
+```{r}
+df = df%>%
+  mutate(id=row_number())
+
+training = df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+m = glm(type~.,training[-1][1:80],family=binomial())
+
+probs <- predict(m, newdata = testing,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs > 0.5] <- "normal"
+
+t = confusionMatrix(as.factor(pred), reference=as.factor(testing$type))
+t
+df = df[-ncol(df)]
+```
+
+
+# # # #
+
+
+2. Using the standardized dataset
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df_S)){
+  var[i] = var(df_S[,i]) #overall variance
+  var1[i] = var(df_S[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_S[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+v=cbind(var,var1,var2)
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var1),fill='red',alpha=0.4)+
+  geom_density(aes(var2),fill='green',alpha=0.4)
+
+max=0
+for (i in var){
+  if(i>max){
+    max=i
+  }
+}
+print(max)
+```
+
+```{r}
+plot(var1~var2)
+```
+
+```{r}
+v=cbind(var,var1,var2)
+boxplot(v[-1:-2,],col=c('blue','red','green'),names=c('overall var','HCC var', 'Normal var'))
+as.data.frame(v[-1:-2,]) %>% ggplot()+
+  geom_boxplot(aes(var),fill='blue',alpha=0.6)+
+  geom_boxplot(aes(var1),fill='red',alpha=0.6)+
+  geom_boxplot(aes(var2),fill='green',alpha=0.6)
+```
+
+
+3. Using the Min-max normalized dataset
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df)){
+  var[i] = var(df_M[,i]) #overall variance
+  var1[i] = var(df_M[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_M[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+plot(var1~var2)
+```
+
+
+```{r}
+v=cbind(var,var1,var2)
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var),fill='blue',alpha=0.4)+
+  geom_density(aes(var1),fill='red',alpha=0.4)+
+  geom_density(aes(var2),fill='green',alpha=0.4)
+
+max=0
+for (i in var){
+  if(i>max){
+    max=i
+  }
+}
+print(max)
+```
+
+
+```{r}
+v=cbind(var,var1,var2)
+boxplot(v[-1:-2,],col=c('blue','red','green'),names=c('overall var','HCC var', 'Normal var'))
+as.data.frame(v[-1:-2,]) %>% ggplot()+
+  geom_boxplot(aes(var),fill='blue',alpha=0.6)+
+  geom_boxplot(aes(var1),fill='red',alpha=0.6)+
+  geom_boxplot(aes(var2),fill='green',alpha=0.6)
+```
+
+
+4. Usinf the Robust scalar normalized dataset
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df_R)){
+  var[i] = var(df_R[,i]) #overall variance
+  var1[i] = var(df_R[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_R[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+plot(var1~var2)
+```
+
+
+```{r}
+v=cbind(var,var1,var2)
+as.data.frame(v) %>% ggplot()+
+  geom_density(aes(var),fill='blue',alpha=0.4)+
+  geom_density(aes(var1),fill='red',alpha=0.4)+
+  geom_density(aes(var2),fill='green',alpha=0.4)
+
+max=0
+for (i in var){
+  if(i>max){
+    max=i
+  }
+}
+print(max)
+```
+
+
+```{r}
+v=cbind(var,var1,var2)
+boxplot(v[-1:-2,],col=c('blue','red','green'),names=c('overall var','HCC var', 'Normal var'))
+as.data.frame(v[-1:-2,]) %>% ggplot()+
+  geom_boxplot(aes(var),fill='blue',alpha=0.6)+
+  geom_boxplot(aes(var1),fill='red',alpha=0.6)+
+  geom_boxplot(aes(var2),fill='green',alpha=0.6)
+```
+
+```{r}
+for(i in 1:length(var)){
+  if (var[i]>40){
+    print(colnames(df)[i])
+  }
+}
+df %>% ggplot()+
+  geom_density(aes(X214218_s_at,fill=type),df)
+ggplot(aes(df$X214218_s_at),fill=type)+geom_density()
+```
+
+
+Regarding the parts 2,3, and 4, it can be seen that normalizing the data in different ways results in very different patterns allowing for potential different approaches for optimal genes selection to include in the model. A very good model was already reached using the genes with the most variability in the original sample, yet it is apparent that this is not the optimal approach, since the different genes has different scales and thus what might be a very high variance score for one, might as well not be as high or be even low for another. That is why this approach does not allow much understanding of the contribution of each selected gene, and it is expected that it would not be as good as other approaches relying on the normalized data.
+
+A quick inspection of the results shows that the robust normalization drags most variability across genes (and across normal and HCC cases) towards 0, leaving a handful of genes with very high variance reaching approximately 60 as maximum. This suggests that those exceptional genes might be good to use in the model.
+
+On the other hand, the standardization technique is shown to result in the most linear-like distribution of variability across the normal and HCC cases, which is expected due to the fact that it makes the overall variance 1 across all genes. This suggests that relying on this dataset might offer the selection approach with the best control over the independent variability of the selected genes over the normal and HCC cases.
+
+Yet, this also raises the issue of potential bias introduced by segregating the variance based on the categories to be predicted. So also whether this approach or the completely unsupervised one is better remains to be investigated. Some work with the standardized dataset will be done below (selection of genes with lowest variance among normal cases).
+
+As for the min-max approach, it is shown to give the most similar results to the original dataset, yet it allows for a much narrower range of variation (of the variances themselves), allowing for easier inspection of the plots and more clear understanding of the relations and comparisons between the genes. These advantages likely emerged at the expense of poor conservation of the outliers, which might be important in this context.
+
+Due to limited time, most of these considerations will be left to the next phase.
+
+
+III. Resampling
+
+Different resampling techniques are used over the different sections. Here, the results of the different resampling techniques will be compared for 1 model.
+
+```{r}
+mut_df = mut_df%>%
+  mutate(id=row_number())
+
+set.seed(123,sample.kind='Rejection') 
+
+training = mut_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(mut_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+model = glm(type~.,training[-1],family=binomial())
+
+probs <- predict(model, newdata = testing,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs > 0.5] <- "normal"
+
+t = confusionMatrix(as.factor(pred), reference=as.factor(testing$type))
+t
+mut_df=mut_df[-ncol(mut_df)]
+```
+The validation set approach is not very reliable since its result can be shown to fluctuate when repeated, depending on the random choice of the testing and training samples.
+
+```{r}
+
+train_control <- trainControl(method = "LOOCV")
+
+model <- train(type ~., mut_df[-1],
+			method = "glm",
+			trControl = train_control)
+
+print(model)
+
+```
+
+```{r}
+train_control <- trainControl(method = "cv",
+                              number = 10)
+ 
+model <- train(type ~., mut_df[-1],
+			method = "glm",
+			trControl = train_control)
+ 
+
+print(model)
+```
+```{r}
+train_control <- trainControl(method = "repeatedcv",
+                            number = 10, repeats = 3)
+
+model <- train(type ~., mut_df[-1],
+			method = "glm",
+			trControl = train_control)
+ 
+
+print(model)
+
+```
+It can be seen that for the considered model, all the techniques gave very similar results. Yet, the most reliable approach would be the one using repeated k-cv, since it will return the most accurate estimate of the accuracy.
+
+
+IV. Penalized logistic regression
+
+Next the use of penalized models (such as LASSO) will be considered. These models are well suited to the case where the number of predictors > number of observations, and whereby potential correlations within the predictors exist as the case was shown to be here. 
+ 
+ 
+```{r}
+require(nnet)
+library(glmnet)
+
+model = glmnet(as.matrix(df[-1:-2]),df[,2],family=binomial(),alpha=1,lambda=NULL)
+model
+```
+
+The results displays the different produced models (with their lambdas). %Dev is used to monitor the models, so that when it stops showing much change no more models are generated.
+The below plots are used to visualize the results.
+
+```{r}
+plot(model,label=TRUE,xvar='norm')
+plot(model,label=TRUE,xvar='dev')
+plot(model,label=TRUE,xvar='lambda')
+```
+
+Next, the genes selected in the model with the minimum lambda are displayed. The minimum lambda point is also inspected.
+
+```{r}
+model.cv = cv.glmnet(as.matrix(df[-1:-2]),df[,2],family=binomial(),alpha=1,nfolds=5)
+x=coef(model.cv,s='lambda.min')
+for(i in 2:length(x)){
+  if(x[i]!=0){
+   print(colnames(df)[i+1])
+  }
+}
+```
+
+```{r}
+plot(model.cv)
+```
+
+```{r}
+model.cv$lambda.min
+```
+
+```{r}
+probs <- predict(model.cv, newx = as.matrix(df[-1:-2]), s = "lambda.min")
+contrasts(df$type)
+
+
+pred <- rep("HCC",nrow(df))
+pred[probs > 0.5] <- "normal"
+pred
+t = confusionMatrix(as.factor(pred), reference=as.factor(df$type))
+t
+```
+
+
+```{r}
+probs = predict(model, as.matrix(df[-1][-1]), s = 0.3)
+pred <- rep("HCC",nrow(df))
+pred[probs > 0.5] <- "normal"
+pred
+t = confusionMatrix(as.factor(pred), reference=as.factor(df$type))
+t
+```
+The training accuracy for the model with min lambda exceeded 98%. The training accuracy for another value of lambda (0.3) is also showed.
+
+```{r}
+df = df%>%
+  mutate(id=row_number())
+
+training = df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+probs <- predict(model.cv, newx = as.matrix(testing[-1:-2]), s = "lambda.min")
+pred <- rep("HCC",nrow(testing))
+pred[probs > 0.5] <- "normal"
+pred
+
+t = confusionMatrix(as.factor(pred), reference=as.factor(testing$type))
+t
+df = df[-ncol(df)]
+```
+The training accuracy by the validation set approach is very almost perfect. 
+
+Some work was also done using another penalized model (logistf), yet it has been shown to be much slower and not effective. Results not included.
+
+```{r,eval=FALSE}
+library(logistf)
+model4 <- logistf(type~.,df[2:100], family = binomial(),control=logistf.control(maxit=2000))
+summary(model4)
+```
+
+
+IV. Features selection
+
+```{r}
+mod = glm(type~.,mut_df[-1],family=binomial())
+```
+
+```{r}
+step.model <- stepAIC(mod, direction = "both", 
+                      trace = FALSE)
+summary(step.model)
+```
+Using the mixed selection approach on the mutated dataset of before allowed to reach a model with AIC 82, much better than the best one reached before (AIC 98).
+
+
+V. LDA & QDA 
+
+Finally, LDA and QDA models will be built using the genes with the lowest varaibility among the nomral cases in the standardized dataset. A new mutatedd dataset will be created to this end.
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df_S)){
+  var[i] = var(df_S[,i]) #overall variance
+  var1[i] = var(df_S[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_S[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+total=0
+for (i in 1:ncol(df_S)){
+  if(var2[i]<0.06){
+    total=total+1
+  }
+}
+print(total)
+```
+
+
+```{r}
+new_df=df_S[1:2]
+current=3
+for (i in 3:ncol(df_S)){
+  if(var2[i]<0.06){
+    new_df=cbind(new_df,df_S[,i])
+    colnames(new_df)[current]=colnames(df_S[i])
+      current=current+1
+  }
+}
+ncol(new_df)
+```
+
+
+```{r}
+library(MASS)
+library(leaps)
+
+model1 <- lda(type~., new_df[-1])
+
+model2 <- qda(type~., new_df[-1])
+```
+
+
+
+
+```{r}
+pred = predict(model1,type="response")
+t = confusionMatrix(as.factor(pred$class), reference=as.factor(new_df$type))
+t
+```
+
+
+```{r}
+new_df = new_df%>%
+  mutate(id=row_number())
+
+new_df$type = factor(new_df$type,labels=c(0,1))
+training = new_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(new_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+model1 = lda(type~.,training[-1])
+
+probs <- predict(model1, newdata = testing,type="category")
+
+t = confusionMatrix(as.factor(probs$class), reference=as.factor(testing$type))
+t
+new_df=new_df[-ncol(new_df)]
+```
+
+The trainign accuracy was shown to be in the order of 96%. As for the testing accuracy it has been shown to fluctuate between 88% and 92% using the validation set approach, so alternative resampling techniques will be also used.
+
+```{r}
+train_control <- trainControl(method = "repeatedcv",
+                            number = 10, repeats = 3)
+
+model <- train(type ~., new_df[-1],
+			method = "lda",
+			trControl = train_control)
+ 
+
+print(model)
+
+```
+
+```{r}
+train_control <- trainControl(method = "loocv")
+
+model <- train(type ~., new_df[-1],
+			method = "lda",
+			trControl = train_control)
+ 
+
+print(model)
+
+```
+The use of the alternative techniques how the testing accuracy to even better than that found using the validation set approach.
+
+```{r}
+roc_lda = roc(response = as.vector(testing$type), predictor = as.vector(probs$posterior[,2]))
+auc(roc_lda)
+```
+Same steps repeated for the QDA model.
+
+```{r}
+pred = predict(model2,type="response")
+pred$class=factor(pred$class,labels=c(0,1))
+t = confusionMatrix(as.factor(pred$class), reference=as.factor(new_df$type))
+t
+```
+
+
+```{r}
+new_df = new_df%>%
+  mutate(id=row_number())
+
+new_df$type = factor(new_df$type,labels=c(0,1))
+training = new_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(new_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+
+model2 = qda(type~.,training[-1])
+
+probs <- predict(model2, newdata = testing,type="category")
+
+t = confusionMatrix(as.factor(probs$class), reference=as.factor(testing$type))
+t
+new_df=new_df[-ncol(new_df)]
+```
+```{r}
+train_control <- trainControl(method = "repeatedcv",
+                            number = 5, repeats = 3)
+
+model <- train(type ~., new_df[-1],
+			method = "qda",
+			trControl = train_control)
+ 
+
+print(model)
+
+```
+
+```{r}
+train_control <- trainControl(method = "loocv")
+
+model <- train(type ~., new_df[-1],
+			method = "qda",
+			trControl = train_control)
+ 
+
+print(model)
+
+```
+```{r}
+roc_qda = roc(response = testing$type, predictor = probs$posterior[,2])
+auc(roc_qda)
+```
+A plot displaying the ROC curves for both models shows that the areas under both are approximately the same, thus they are almost as good as each other.
+
+```{r}
+
+ggroc(list(lda=roc_lda, qda=roc_qda))
+
+```
+
+
