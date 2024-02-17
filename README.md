@@ -41,15 +41,35 @@ model3 = glm(type~X205695_at +X214677_x_at+X209614_at+X206561_s_at+X220491_at,mu
 
 2. **[Tree-Based Approaches](tree_based_approaches)**
     - *[Decision Trees](tree_based_approaches/decision_trees.R):* Build decision trees to identify key gene expression patterns indicative of hepatocellular carcinoma.
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/9a5a0af0-4e22-4fb7-9302-7aabd49be1a9)
+
     - *[Random Forest](tree_based_approaches/random_forest_bagging.R):* Aggregate decision trees to enhance accuracy in predicting hepatocellular carcinoma from complex gene expression profiles.
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/d3edbe9b-2626-4161-acfd-b7d4bd1b21c1)
+      
     - *[Bagging](tree_based_approaches/random_forest_bagging.R):* Apply bagging techniques to reduce overfitting and improve the robustness of predictive models.
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/e21e8a4e-8a20-49d5-b69c-b4763fedf75f)
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/cf717861-68c0-448d-b5b4-5830ef237196)
 
 3. **[Boruta-based Genes Selection](boruta_gene_selection.R):** Use Boruta alongside random forest for effective gene selection, emphasizing relevance to hepatocellular carcinoma prediction.
 
+    ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/d34f7cdd-2e97-47bf-960d-eed19eeb4401)
+    ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/cb6f5997-55b2-4649-9944-6e210a8919b9)
+
+
 4. **[Unsupervised Learning Approaches](unsupervised_learning_approaches)**
     - *[Support Vector Machines (SVM)](unsupervised_learning_approaches/SVM.R):* Utilize SVM to find optimal hyperplanes for separating normal and cancer samples in GEO data.
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/ac8974aa-1b42-4bd8-9cd8-83a5e47da091)
+      
     - *[Principal Component Analysis (PCA)](unsupervised_learning_approaches/PCA.R):* Reduce dimensionality with PCA to visualize and identify patterns in hepatocellular carcinoma gene expression data.
     - *[Hierarchical Clustering](unsupervised_learning_approaches/hierarchical_clustering.R):* Group samples with similar gene expression profiles, potentially revealing distinct subtypes of hepatocellular carcinoma.
+
+      ![image](https://github.com/yazid-hoblos/Carcinoma-Prediction/assets/125372209/e721075f-4369-4a11-88f3-4ea54e5e2546)
+      
     - *[K-Means Clustering](unsupervised_learning_approaches/k-means.R):** Cluster gene expression profiles to identify similarities and differences in hepatocellular carcinoma samples.
 
 ## References 
