@@ -1,0 +1,1106 @@
+---
+title: "Phase III"
+author: "Yazid Hoblos"
+date: '2022-11-26'
+output: html_document
+---
+
+```{r}
+knitr :: opts_chunk$set(warning=FALSE)
+knitr :: opts_chunk$set(error=TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(tidyverse)
+library(Boruta)
+library(caret)
+library(party)
+library(randomForest)
+library(pROC)
+library(remotes)
+library(devtools)
+library(ggfortify)
+library(cli)
+library(ggbiplot)
+library(e1071)
+library(Rfast)
+library(kernlab)
+library(factoextra)
+```
+
+```{r}
+df = read.csv("Liver Cancer.csv")
+```
+ 
+```{r}
+df_S = df
+df_S[3:ncol(df_S)] <-  scale(df_S[3:ncol(df_S)],center = TRUE, scale = TRUE)
+```
+
+```{r}
+df_M = df[1:2]
+normalize <- function(x, na.rm = TRUE) {
+    return((x- min(x)) /(max(x)-min(x)))
+}
+
+df_M [3:ncol(df)] = lapply(df[3:ncol(df)], normalize)
+```
+
+```{r}
+df_R = df[1:2]
+robust_scalar<- function(x){(x- median(x)) /(quantile(x,probs = .75)-quantile(x,probs = .25))}
+df_R[3:ncol(df)] = lapply(df[3:ncol(df)], robust_scalar)
+```
+
+df_s, df_M, and df_R are the normalized versions of df using standardization, min-max, and robust scalar respectively.
+
+
+I. Genes selection (Random forest based approach)
+
+(1.1) Introducing Boruta
+
+A random-forest based approach for gene selection will be considered here. This will be done through the package Boruta, providing the function Boruta, which computes the importance of each feature in the given data frame. It does so by shuffling the values to remove their correlations with the target variable, thus creating a set of shadow features. A random forest will be next built and the importance of each feature will be computed using the Mean Decrease Accuracy approach, which expresses how much accuracy the model loses by excluding each feature. 
+
+The Z score for each shadow feature will be computed, where the Z score is the mean of accuracy loss divided by standard deviation of accuracy loss, and features will be classified as unimportant, important or tentative based on where the importance value falls with respect to the max z-value (shadow max). The logic behind this is that a feature is useful only if it’s capable of doing better than the best randomized (shadow) feature, i.e its importance value is higher than shadow max.
+
+Tentative features have an importance value that is so close to shadow max that Boruta is not able to make a decision about them. 
+
+First Boruta will be run on the original dataset.
+
+```{r}
+df$type=as.factor(df$type)
+boruta <- Boruta(y=df[,2], x =df[,3:ncol(df)], doTrace = 2, maxRuns = 200)
+print(boruta)
+```
+
+This very high number of features cannot be visualized, so a smaller proportion will be selected (with all the important and tentative features along with some of the unimportant features included), in order to better understand how this algorithm selection work.
+
+In the boruta plot below, the tentative features are shown in yellow to be around the blue shadow max, with the unimportant features (in red) significantly below shadow max.
+
+
+```{r}
+count=1
+d = df[2]
+for (i in 3:ncol(df)){
+  if((as.numeric(boruta$finalDecision[i])==1|| as.numeric(boruta$finalDecision[i])==2 || as.numeric(boruta$finalDecision[i])==3) & count<300){
+  count=count+1
+  d=cbind(d,df[,i])
+  colnames(d)[count]=colnames(df)[i]
+  }}
+b = Boruta(y=d[,1], x =d[,2:ncol(d)], doTrace = 2, maxRuns = 200)
+plot(b,las=2,ces.axis=0.7)
+```
+
+An alternative visualization approach allowing for the visualization of the whole set of features is possible with the important history plot, which reflect the attributes importance per run.
+It can be seen that most unimportant features are classified as such in the first dozens of runs, which can be confirmed from following the selection process after each run, where after around 20 to 30 runs more then 20000 genes were classified as unimportant and the following runs had a much slower pace of selection, only classifying a handful of genes as important or not, with many runs without any classification output.
+
+This is likely to be due to the fact that most genes in the data set are irrelevant for the classification task, so they are all eliminated after a few runs, with the rest of the runs focusing on the 200-300 left genes which are more challenging to classify. This is confirmed through the fact that most of these 200-300 genes are still classified as tentative after 200 runs. Increasing the number of runs will allow for a more precise classification for these tentative features. Yet since 89 genes are already classified as important after 200 runs (thus they are the most important even if other tentative genes are to be found important after more runs), there is no need to look for more important genes.
+
+```{r}
+plotImpHistory(boruta)
+```
+
+Also the tentative features may be taken with the important features, but since the number of important features in this case is already likely to be enough for good predictions, only the important features will be further considered.
+
+```{r}
+boruta.bank <- TentativeRoughFix(boruta)
+print(boruta.bank)
+```
+
+To this end a new dataset with those features (genes) only will be created.
+
+```{r}
+list = getSelectedAttributes(boruta, withTentative = F)
+new_df=as.data.frame(df$type)
+v=c()
+current=2
+for (i in 1:ncol(df)){
+  for(j in 1:length(list)){
+  if(colnames(df)[i]==list[j]){
+    new_df=cbind(new_df,df[,i])
+    v=cbind(v,colnames(df)[i])
+    colnames(new_df)[current]=colnames(df)[i]
+    current=current+1
+    break
+  }
+}
+}
+colnames(new_df)[1]='type'
+ncol(new_df)
+```
+One important observation is the high stability of boruta selection, despite its reliance on random forest. Running Boruta many times will give almost perfectly similar results.
+
+Even running boruta again on this new dataset will conserve all the features as important.
+
+```{r}
+boruta2 <- Boruta(y=as.factor(new_df[,1]), x =new_df[,2:ncol(new_df)], doTrace = 2, maxRuns = 200)
+print(boruta2)
+```
+
+```{r}
+plot(boruta2,las = 2, cex.axis = 0.7)
+```
+It can be seen that using only yhe most important gene to build a simple logistic regression model will result in very good accuracy, especially if compoared to anohter models build using some unimportant gene.
+
+```{r}
+m=glm(type~X218002_s_at,df,family=binomial())
+summary(m)
+m=glm(type~X209560_s_at,df,family=binomial())
+summary(m)
+```
+
+```{r}
+df %>% ggplot()+
+   geom_density(aes(X218002_s_at,group=type,fill=type,alpha=0.5))
+df %>% ggplot()+
+   geom_density(aes(X220114_s_at,group=type,fill=type,alpha=0.5))
+df %>% ggplot()+
+   geom_density(aes(X218061_at,group=type,fill=type,alpha=0.5))
+df %>% ggplot()+
+   geom_density(aes(X220148_at,group=type,fill=type,alpha=0.5))
+```
+
+A quick inspection of the genes selected as the most important will reflect the reason for that classification. It has been noticed in phase II that when the genes with highest variance were selected, inspecting the plots showed that in most cases those genes had high variance across HCC cases with most of the normal cases concentrated in very narrow ranges (as can be seen for the 4th gene X220148_at here), yet very small disturbances were also seen in those genes plots (they also can be seen in the 4th plotted gene) where a very small number of normal cases will have their expression of the considered gene significantly deviating from normal entering into the region that would have otherwise been restricted for HCC cases allowing very good separation. This will result in a good accuracy for normal cases classification, yet a worse accuracy when it comes to HCC cases (false negative proportion will be much higher than that of false positive).
+
+Here it can be seen that genes showing different patterns are selected along with those displaying the previously found pattern. The first 2 genes show a similar pattern which is reversed, the HCC cases are all concentrated in a small region with small exceptions forming disturbances into the region which would have been otherwise restricted for the normal cases. 
+
+Combining these 2 types of genes will allow for a better separation and more accurate classification for both normal and HCC cases, while relying on only one of them is likely to result in more accurate classifications for either of them only. This effect is clearly reflected using the simple logistic regression models below. Using the 4th gene only 23 HCC cases are mistakenly classified as normal, while only 9 normal cases are classified as HCC.
+
+
+```{r}
+m=glm(type~X220148_at,df,family=binomial())
+summary(m)
+```
+
+```{r}
+probs <- predict(m, type = "response")
+pred <- rep("HCC",nrow(df))
+pred[probs > 0.5] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(df$type))
+t
+```
+Yet, by only adding the 1st gene to the model, the accuracy will significantly increase (considering th AIC), and the previous discrepancy in false positive and false negative errors will be reduced.
+
+```{r}
+m=glm(type~X218002_s_at+X220114_s_at,df,family=binomial())
+summary(m)
+```
+
+
+```{r}
+probs <- predict(m, type = "response")
+pred <- rep("HCC",nrow(df))
+pred[probs > 0.5] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(df$type))
+t
+```
+
+It can also be seen that other genes not following these 2 patterns are also selected, for example the 3rd gene X28061_at does not allow for a separation that is as good as the other ones, yet it is a special case where the HCC cases are shown to get to an abnormally high levels of expression not reached by any normal cases.
+
+So overall, it is to be expected that this selection approach combines genes with different patterns of density across cases, which will contribute differently to the classification process allowing almost perfect predictions. Simply selecting genes based on their variance does not offer as much accuracy because it will not be able to capture as much genes complementing each other to give better results. 
+
+This last point can be illustrated by the fact that the investigation of the most important genes selected by Boruta will not show any clear linearties and relationships, which was shown to be the case when the genes with highest variance were selected in phase II. 
+
+```{r}
+pairs(new_df[2:20])
+```
+
+Also, considering the variability over the different classes to try to control the selection process allowing for such complementation will be shown not be efficient in the next part.
+
+
+(1.2) Using Boruta for Phase II considerations
+
+This boruta selection approach may be used to investigate the effects of different types of normalization, as intended before (phase II). It might as well be used to assess how good the previously considered gene selection approaches were, which was already started above.
+
+(1.2.1) Normalization effect
+
+```{r}
+b_S = Boruta(y=as.factor(df_S[,2]), x =df_S[,3:ncol(df_S)], doTrace = 2, maxRuns = 200)
+b_M = Boruta(y=as.factor(df_M[,2]), x =df_M[,3:ncol(df_M)], doTrace = 2, maxRuns = 200)
+b_R = Boruta(y=as.factor(df_R[,2]), x =df_R[,3:ncol(df_R)], doTrace = 2, maxRuns = 200)
+```
+
+```{r}
+print(b_S)
+print(b_R)
+print(b_M)
+```
+A function will be created to assess commonality between the results of running Boruta (for the same number of runs) on the different normalized versions of the dataset. 
+
+```{r}
+#Takes as arguments the selected genes vectors of 2 Boruta runs 
+common_genes <- function(d1,d2) { #return the fraction of the genes selected as important 2 distinct Boruta runs / max of d1 and d2
+  c = 0
+  v=c()
+  for (i in d1){
+    for(j in d2){
+      if(i==j){
+        c=c+1
+        break
+      }
+    }
+    if(j==d2[length(d2)]){ #extract the genes that are not common
+      v=cbind(v,i[1])
+    }
+  }
+  return (list((c/min(length(d1),length(d2))),as.list(v)))
+}
+```
+
+
+```{r}
+common_genes(getSelectedAttributes(b_S),getSelectedAttributes(b_M))[1]
+common_genes(getSelectedAttributes(b_S),getSelectedAttributes(b_R))[1]
+common_genes(getSelectedAttributes(b_R),getSelectedAttributes(b_M))[1]
+common_genes(getSelectedAttributes(boruta),getSelectedAttributes(b_R))[1]
+common_genes(getSelectedAttributes(boruta),getSelectedAttributes(b_M))[1]
+common_genes(getSelectedAttributes(boruta),getSelectedAttributes(b_S))[1]
+```
+It can be seen that the selected genes did not differ much between the differently normalized datasets, nor between them and the original dataset, suggesting that Boruta is likely not to be affected by the different scales of the different features, unlike many other approaches like PCA. 
+
+
+(1.2.2) Assessing variance-based gene selection approaches 
+
+The mutated dataset of phase II (selecting the 27 genes with highest variance) will be created again.
+
+```{r}
+mut_df=df[1:2]
+current=3
+for (i in 3:ncol(df)){
+  if(var(df[i])>6){
+    mut_df=cbind(mut_df,df[,i])
+    colnames(mut_df)[current]=colnames(df[i])
+    current=current+1
+  }
+}
+ncol(mut_df)
+```
+
+```{r}
+boruta3 <- Boruta(y=as.factor(mut_df[,2]), x =mut_df[,3:ncol(mut_df)], doTrace = 2, maxRuns = 200)
+print(boruta3)
+```
+
+```{r}
+plot(boruta3,las=2,cex.axis=0.7)
+```
+
+The results of running Boruta on this mutated dataset shows that almost all of its genes are important. Yet, it is important to note here that, unlike the case of running boruta on new_df (containing all the important features selected after 200 runs) where the original importance scale was conserved, the importance scale here changed and thus the important features selected for mut_df might not be actually important.
+
+Running common_genes between boruta3 (for mut_df) and boruta (for original df) and boruta2 (for new_df with only the important genes), reflects this point. Only a ratio of 0.125 of the genes classified (acounting for 3 genes) as important by Boruta are among the 27 genes with highest variance.
+
+```{r}
+common_genes(getSelectedAttributes(boruta), getSelectedAttributes(boruta3))[1]
+common_genes(getSelectedAttributes(boruta2), getSelectedAttributes(boruta3))[1]
+```
+Next, more control over the selection will be allowed by selecting the genes with highest highest overall variance and lowest variance across normal cases, in an attempt to get a better seperation using such genes.
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df)){
+  var[i] = var(df[,i]) #overall variance
+  var1[i] = var(df[1:181,i]) #variance over HCC cases
+  var2[i] = var(df[182:357,i]) #variance over normal patients
+}
+```
+
+
+```{r}
+mut_df=df[1:2]
+current=3
+for (i in 3:ncol(df)){
+  if(var[i]>5.2 & var2[i]<1){
+    mut_df=cbind(mut_df,df[,i])
+    colnames(mut_df)[current]=colnames(df[i])
+    current=current+1
+  }
+}
+ncol(mut_df)
+```
+
+```{r}
+boruta3 <- Boruta(y=as.factor(mut_df[,2]), x =mut_df[,3:ncol(mut_df)], doTrace = 2, maxRuns = 200)
+print(boruta3)
+```
+It can be seen that the ratio further decreased reflecting that this approach for selection is even less efficient.
+
+```{r}
+common_genes(getSelectedAttributes(boruta3),getSelectedAttributes(boruta))[1]
+```
+
+Next, genes will be selected using the standardized dataset, where the genes with lowest variance across normal cases will be selected, which was expected in phase II to "offer the selection approach with the best control over the independent variability of the selected genes over the normal and HCC cases".
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df_S)){
+  var[i] = var(df_S[,i]) #overall variance
+  var1[i] = var(df_S[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_S[182:357,i]) #variance over normal patients
+}
+```
+
+```{r}
+mut_df2=df[1:2]
+current=3
+for (i in 3:ncol(df)){
+  if(var1[i]<0.25){
+    mut_df2=cbind(mut_df2,df_S[,i])
+    colnames(mut_df2)[current]=colnames(df[i])
+      current=current+1
+  }
+}
+ncol(mut_df2)
+```
+```{r}
+boruta4 <- Boruta(y=as.factor(mut_df2[,2]), x =mut_df2[,3:ncol(mut_df2)], doTrace = 2, maxRuns = 200)
+print(boruta4)
+```
+This selection approach resulted in above half of the selected genes being important, much better than the approaches considered before.
+An interesting observation is that no genes are shared by this selection approach and the one selecting for highest variance.
+
+```{r}
+common_genes(getSelectedAttributes(boruta4),getSelectedAttributes(boruta))[1]
+common_genes(getSelectedAttributes(boruta4),getSelectedAttributes(boruta3))[1]
+```
+Next, the dataset normalized using min-max will be considered.
+
+```{r}
+var=var1=var2=c(0,0)
+for(i in 3:ncol(df)){
+  var[i] = var(df_M[,i]) #overall variance
+  var1[i] = var(df_M[1:181,i]) #variance over HCC cases
+  var2[i] = var(df_M[182:357,i]) #variance over normal patients
+}
+```
+
+
+```{r}
+mut_df_M=df[1:2]
+current=3
+v2 =c()
+for (i in 3:ncol(df)){
+  if(var[i]>0.09){
+    mut_df_M=cbind(mut_df_M,df_M[,i])
+    colnames(mut_df_M)[current]=colnames(df[i])
+    v2=cbind(v2,colnames(df_M[i]))
+    current=current+1
+  }
+}
+ncol(mut_df_M)
+```
+
+```{r}
+boruta5 <- Boruta(y=as.factor(mut_df_M[,2]), x =mut_df_M[,3:ncol(mut_df_M)], doTrace = 2, maxRuns = 200)
+print(boruta5)
+```
+This approach is shown to be less efficient than the one using the standardized dataset, and it can also be notices that unlike the last approach displaying 0 common genes with the highest variance approach, 60% of the genes selected by this approach are among the highest variance genes.
+
+```{r}
+common_genes(getSelectedAttributes(boruta5),getSelectedAttributes(boruta))[1]
+common_genes(getSelectedAttributes(boruta3),getSelectedAttributes(boruta5))[1]
+```
+More control will be allowed over this selection as was done before by selecting the genes with highest overall variance et lowest variance across normal cases in the min-max dataset.
+
+```{r}
+mut_df_M=df[1:2]
+current=3
+v2 =c()
+for (i in 3:ncol(df)){
+  if(var[i]>0.08 & var2[i]<0.02){
+    mut_df_M=cbind(mut_df_M,df_M[,i])
+    colnames(mut_df_M)[current]=colnames(df[i])
+    v2=cbind(v2,colnames(df_M[i]))
+    current=current+1
+  }
+}
+ncol(mut_df_M)
+```
+
+```{r}
+boruta5 <- Boruta(y=as.factor(mut_df_M[,2]), x =mut_df_M[,3:ncol(mut_df_M)], doTrace = 2, maxRuns = 200)
+print(boruta5)
+```
+This is shown to further decrease the commonality ratio (despite it selecting for more genes).
+
+```{r}
+common_genes(getSelectedAttributes(boruta5),getSelectedAttributes(boruta))[1]
+common_genes(getSelectedAttributes(boruta3),getSelectedAttributes(boruta5))[1]
+```
+
+Generally, it was shown that the highest-variance selection approach was not efficient using the original dataset, with a potential to increase its efficiency significantly using normalized versions of the dataset. The best variance-based selection approach was shown to be the one using the standardized dataset and selecting for the genes with lowest variance across the normal cases. Only in this case where the overall variance will be 1 was it shown to be efficient to consider the variability across 1 class alone, yet in the case of other normalization techniques and the original dataset such consideration was shown to further decrease the efficiency of the selection approach. 
+
+
+II. Tree-based approaches 
+
+(2.1) Random Forest / Bagging
+
+
+```{r}
+random = randomForest(type~.,data=new_df,mtry = sqrt(ncol(new_df)-1), importance = T, ntree = 1000)
+bagging = randomForest(type~.,data=new_df,mtry=ncol(new_df)-1,importance=T,ntree=1000)
+plot(random)
+plot(bagging)
+```
+
+A clearer representation of the results for the bagging and random forest models will be used.
+
+```{r}
+oob.err.data <- data.frame(
+  Trees = rep(1:nrow(bagging$err.rate), 3), 
+  Type = rep(c("OOB","normal","HCC"), each = nrow(bagging$err.rate)),
+  Error = c(bagging$err.rate[,"OOB"], bagging$err.rate[,"normal"], bagging$err.rate[,"HCC"]))
+
+ggplot(data = oob.err.data, aes(x = Trees, y= Error)) + geom_line(aes(color = Type))
+print(bagging)
+```
+
+```{r}
+oob.err.data <- data.frame(
+  Trees = rep(1:nrow(random$err.rate), 3), 
+  Type = rep(c("OOB","normal","HCC"), each = nrow(random$err.rate)),
+  Error = c(random$err.rate[,"OOB"], random$err.rate[,"normal"], random$err.rate[,"HCC"]))
+
+ggplot(data = oob.err.data, aes(x = Trees, y= Error)) + geom_line(aes(color = Type))
+print(random)
+```
+
+It can be seen that using the random forest approach will give slightly better results than bagging. 
+Using the tuneRF function to find the mtry parameter choices leading to the lowest OOB errors reflect the fact that many mtry choice below 9 (the sqrt of ncol(new_df)) can lead to the same error as the random forest model already used, yet despite repeating tuneRF many times, it rarely shows a model resulting in a lower error rate. So it does not seem that a better model can be reached using different parameters.
+
+The model chosen by tuneRF is also presentated by turning doBest=TRUE, yet it can be noticed that this model will be highly variable.
+
+```{r}
+t <- tuneRF(new_df[,-1], new_df[,1],
+       stepFactor = 0.5,
+       mtryStart=2,
+       plot = TRUE,
+       ntreeTry = 50,
+       trace = TRUE,
+       improve = 1e-5,doBest=TRUE)
+oob.err.data <- data.frame(
+  Trees = rep(1:nrow(t$err.rate), 3), 
+  Type = rep(c("OOB","normal","HCC"), each = nrow(t$err.rate)),
+  Error = c(t$err.rate[,"OOB"], t$err.rate[,"normal"], t$err.rate[,"HCC"]))
+
+ggplot(data = oob.err.data, aes(x = Trees, y= Error)) + geom_line(aes(color = Type))
+print(t)
+```
+
+Most trees used are shown to be only in the order of around 9 nodes.
+
+```{r}
+hist(treesize(t),
+     main = "No. of Nodes for the Trees",
+     col = "green")
+```
+Here the results of boruta are replicated. The importance values for each of the selected genes (using the Mean Decrease Accuracy parameter) can be investigated.
+
+```{r}
+varImpPlot(t,sort = T,n.var = 10,main = "Top 10 - Variable Importance")
+importance(t)
+```
+
+The partial plot is used to give a graphical depiction of the effect of different variables on the each category classification.
+It can be seen that for the same gene, its effect on HCC classification is the same for normal classification but reversed.
+These plots confirm the observation of before that this selection approach will combine genes contributing differently to the classification task, and complementing each others patterns of separation to reach the optimal results.
+The plots are shown for 2 genes with 10 times discrepancy in their importance scores.
+
+```{r}
+partialPlot(t, new_df,X205019_s_at,'HCC')
+partialPlot(t, new_df,X205019_s_at,'normal')
+partialPlot(t, new_df,X215330_at ,'HCC')
+partialPlot(t, new_df,X215330_at ,'normal')
+```
+
+A random forest will be created with a proximity matrix, to allow for its visualization using MDSplot, which reflects the very good separation between the cases, and allow to see the small number of exceptional cases likely to be misclassified by the model.
+
+```{r}
+t <- tuneRF(new_df[,-1], new_df[,1],
+       stepFactor = 0.5,
+       mtryStart=2,
+       plot = TRUE,
+       ntreeTry = 50,
+       trace = TRUE,
+       improve = 1e-5,doBest=TRUE,proximity=TRUE)
+MDSplot(t, new_df$type)
+```
+
+An alternative approach can be followed using caret, which allows for the metric of choice for the error rate computation. Here it is combined with cross validation for testing error calculation.
+
+```{r}
+control <- trainControl(method="cv", number=10,returnResamp="all")
+caret_res <- train(type ~., data=new_df, method="rf", metric="Accuracy", ntree = 100, trControl=control)
+
+df = data.frame(caret_res$resample,test="caret")
+
+
+ggplot(df,aes(x=mtry,y=Accuracy,col=test))+
+stat_summary(fun.data=mean_se,geom="errorbar",width=0.2) +
+stat_summary(fun=mean,geom="line") + facet_wrap(~test)
+```
+
+Parts of the random forest may be plotted using the below code as well.
+
+```{r}
+cf=cforest(type ~ ., data=new_df, controls=cforest_control(mtry=4, mincriterion=0))
+pt <- party:::prettytree(cf@ensemble[[1]], names(cf@data@get("input")))
+pt
+```
+
+
+(2.2) Decision trees 
+
+
+```{r}
+tree <- rpart(formula = type~.,new_df, method = "class")
+rpart.plot(tree,type=4)
+tree
+```
+
+The tree based on the genes selected by Boruta is shown to be very simple, relying on 2 genes, yet efficient.
+The optimal complexity parameter (cp) is shown to be for size 2. cp is used to select the optimal tree size. If the cost of adding another variable to the decision tree from the current node is above the value of cp, then tree building does not continue. cp m ay be decreased to increase the size of the tree, but this will lead to overfitting.
+
+```{r}
+printcp(tree)
+plotcp(tree)
+```
+Here, even when cp is lowered the min error remains for trees considering 2 genes only.
+
+```{r}
+tree <- rpart(formula = type~.,new_df, method = "class",cp=0.0000000001)
+rpart.plot(tree,type=4)
+printcp(tree)
+plotcp(tree)
+```
+
+
+```{r}
+new_df = new_df%>%
+  dplyr::mutate(id=row_number())
+
+training = new_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(new_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+new_df=new_df[-ncol(new_df)]
+```
+
+```{r}
+tree <- rpart(formula = type~.,training, method = "class")
+rpart.plot(tree,type=4)
+```
+```{r}
+p <- predict(tree, testing, type = 'class')
+confusionMatrix(p, reference=as.factor(testing$type), positive="HCC")
+```
+
+```{r}
+p <- predict(tree, testing, type = 'prob')
+p <- p[,2]
+r <- multiclass.roc(testing$type, p, percent = TRUE)
+roc <- r[['rocs']]
+r <- roc[[1]]
+plot.roc(r,
+         print.auc=TRUE,
+         auc.polygon=TRUE,
+         grid=c(0.1, 0.2),
+         grid.col=c("green", "red"),
+         max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue",
+         print.thres=TRUE,
+         main= 'ROC Curve')
+```
+The results of the classificatoin task are shown to be very good, 92% using the validation set approach, while the ROC curve displays an AUC of 96%.
+
+
+III. Unsupervised
+
+
+(3.1) PCA (principal component analysis)
+
+
+```{r}
+pca <- prcomp(new_df[-1], scale = T, center = T)
+summary(pca)
+```
+
+The following features could be also inspected in addition to the PC values for all the features:
+
+center - the column means used to center the data
+scale - the column sd used to scale the data
+rotation - the direction of the vectors in terms of the original features. This information somehow allows to define new data in terms of the originial principal components.
+x - the value of each observation in the original dataset projected to the principal components
+
+```{r}
+pca$center
+pca$scale
+pca$rotation
+head(pca$x,10)
+```
+A ver good seperation can be seen to be provided using PC1 nad PC2.
+
+```{r}
+biplot(pca)
+autoplot(pca,data=new_df,colour='type')
+```
+An alternative better approach to plot the results is provided by ggbiplot. It can be seen that most of the genes are either pointed to the right or to the left, which allows for the good separation between the normal and HCC cases seen using the autoplot. Most of the normal cases are mainly classified using the genes pointing to the right, while to HCC cases are classified using the ones pointing to the left.
+
+```{r}
+ggbiplot(pca, obs.scale = 2, var.scale =1 , ellipse = TRUE, circle = TRUE,groups=new_df$type) +
+  scale_color_discrete(name = '') +
+  theme(legend.direction = 'horizontal', legend.position = 'top')
+```
+
+The variance explained by each component is seen to decrease significantly after the first PC from 60% to 4% for PC2, then it continues to decrease at a much slower decreasing pace.
+
+```{r}
+# Getting proportion of variance for a scree plot
+pca.var <- pca$sdev^2
+pve <- pca.var / sum(pca.var)
+
+# Plot variance explained for each principal component
+plot(pve, 
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     ylim = c(0,1), 
+     type = "b")
+```
+The cumulative proportion of variance explained by the PC components can be also plotted.
+
+```{r}
+pve
+# Plot cumulative proportion of variance explained
+plot(cumsum(pve), xlab = "Principal Component",
+     ylab = "Cumulative Proportion of Variance Explained",
+     ylim = c(0, 1), type = "b")
+```
+The correlations between the dimensions(pc values) and the genes, as well as the contribution of the genes to each dimension can be examined using get_pca_var. 
+
+```{r}
+get_pca_var(pca)[2]
+get_pca_var(pca)[4]
+```
+
+It is important to note that not scaling the data will lead to different results. Yet the separation is not shown to be majorly affcted by non-scaling in this case, which might be related to the observation of before where running boruta on normalized and non-normalized versions of the data did not result in much discrepancy of the results. So it might be the case that most of the genes in this dataset have similar scales, so that they are not affected much by normalization.
+
+```{r}
+pca <- prcomp(new_df[-1], scale = F, center = T)
+```
+
+```{r}
+autoplot(pca,data=new_df,colour='type')
+```
+
+
+
+(3.2) K-Means Clustering
+
+```{r}
+km.out <- kmeans(new_df[-1], centers = 2, nstart = 20)
+summary(km.out)
+```
+
+```{r}
+km.out$cluster
+```
+
+```{r}
+km.out
+```
+```{r}
+probs <- km.out$cluste
+pred <- rep("HCC",nrow(new_df))
+pred[probs == probs[length(probs)]] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(new_df$type))
+t
+```
+Creating 2 clusters using the new_df dataset is shown to result in 2 clusters with 96% similarity with the actual 2 groups HCC and normal.
+
+The following plots show the pairs plots for some of the genes colored by cluster and by category (HCC, normal). The patterns are very similar, reflecting that the clusters are intimately related to the 2 original categories.
+
+```{r}
+new_df$type=factor(new_df$type,labels=c(2,1))
+plot(new_df[-1][1:10], col = km.out$cluster)
+plot(new_df[-1][1:10], col = new_df$type)
+```
+The following plot displays the error change for differents choices of clusters.
+
+```{r}
+wss <- 0
+
+# For 1 to 15 cluster centers
+for (i in 1:15) {
+  km.out <- kmeans(new_df[-1], centers = i, nstart = 20)
+  # Save total within sum of squares to wss variable
+  wss[i] <- km.out$tot.withinss
+}
+
+# Plot total within sum of squares vs. number of clusters
+plot(1:15, wss, type = "b", 
+     xlab = "Number of Clusters", 
+     ylab = "Within groups sum of squares")
+```
+Using 3 clusters instead is shown to result in the additional cluster being mostly a sub part of the cluster corresponding for HCC cases, which will slightly increase the accuracy by reducing the classification of HCC cases as normal.
+
+```{r}
+km.out <- kmeans(new_df[-1], centers = 3, nstart = 20)
+km.out$cluster
+plot(new_df[-1][1:10], col = km.out$cluster)
+```
+
+
+```{r}
+probs <- km.out$cluster
+pred <- rep("HCC",nrow(new_df))
+pred[probs == probs[length(probs)]] <- "normal"
+pred
+t = confusionMatrix(as.factor(pred), reference=factor(new_df$type,labels=c('HCC','normal')))
+t
+```
+
+
+(3.3) Hierarchical Clustering
+
+```{r}
+hclust.out <- hclust(dist(new_df[-1]))
+summary(hclust.out)
+```
+
+```{r}
+plot(hclust.out)
+abline(h = 30, col = "red")
+```
+
+
+```{r}
+# Cut by height
+c=cutree(hclust.out, h = 30)
+c
+```
+
+Using the hierarchical clustering approach is shown to result in 2 clusters that are highly correlated with the HCC and normal categories, yet less correlated than the clusters produced using k-means clustering.
+
+```{r}
+new_df$type = factor(new_df$type,labels=('HCC','normal'))
+pred <- rep("HCC",nrow(new_df))
+pred[c == c[length(c)]] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(new_df$type))
+t
+```
+It is more challenging to get 3 clusters cutting the tree by height, so it will be cut using the k parameter to this end.
+
+```{r}
+# Cut by number of clusters
+c=cutree(hclust.out, k = 3)
+c
+```
+It can be noticed that as for k-means taking creating 3 clusters will result in the creation of 1 cluster for normal cases with the 2 other clusters representing the HCC cases. The similarities remain the same using 3 clusters.
+
+```{r}
+pred <- rep("HCC",nrow(new_df))
+pred[c == c[length(c)]] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(new_df$type))
+t
+```
+
+
+However unlike k-means clustering where increasing the number of clusters above 3 will result in less correlated patterns with the 2 original categories, it was noticed here that increasing the number of clusters up to 7 and more will result in 6 clusters representative for the HCC cases, with 1 cluster representative of the normal cases, allowing for a better separation of the clusters into HCC and normal cases.
+
+```{r}
+c=cutree(hclust.out, k = 7)
+c
+pred <- rep("HCC",nrow(new_df))
+pred[c == c[length(c)]] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=as.factor(new_df$type))
+t
+```
+
+There are 4 methods to measure distance between clusters:
+
+1. complete: pairwise similarty between all observations in cluster 1 and 2, uses largest of similarities
+2. single: same as above but uses the smallest of similarities
+3. average: same as above but uses average of similarities
+4. centroid: finds centroid of cluster 1 and 2, uses similarity between two centroids
+
+* complete and average produce more balanced trees and are more commonly used
+* single fuses observations in one at a time and produces more unblanced trees
+* centroid can create inversion where clusters are put below single values
+
+practical matters
+* data needs to be scaled so that features have the same mean and standard deviation
+* normalized features have a mean of zero and a sd of one
+
+```{r}
+# Cluster using complete linkage: hclust.complete
+hclust.complete <- hclust(dist(new_df[-1]), method = "complete")
+
+# Cluster using average linkage: hclust.average
+hclust.average <- hclust(dist(new_df[-1]), method = "average")
+
+# Cluster using single linkage: hclust.single
+hclust.single <- hclust(dist(new_df[-1]), method = "single")
+
+# Cluster using single linkage: hclust.centroid
+hclust.centroid <- hclust(dist(new_df[-1]), method = "centroid")
+
+```
+
+```{r}
+plot(hclust.complete, main = "Complete")
+plot(hclust.average, main = "Average")
+plot(hclust.single, main = "single")
+plot(hclust.centroid, main = "centroid")
+```
+
+```{r}
+apply(new_df[-1],2,sd)
+```
+A comparison between k-means and hierarchical clustering will be also considered.
+
+The observation noticed before about increasing the number of clusters for the hierarchical approach leading to more similarity with the 2 actual classes with 1 cluster only corresponding to the normal cases is confirmed here. It can also be seen that this is not the case for k-means, for which starting 5 clusters, no unique cluster will correspond to 1 specific actual category.
+
+```{r}
+for (i in 2:8){
+km.out <- kmeans(new_df[-1], centers = i, nstart = 20)
+cut <- cutree(hclust.out, k = i)
+print(i-1) #iteration number
+print(table(km.out$cluster, cut)) #comparing the clusters of the 2 approaches
+print("kmeans")
+print(table(km.out$cluster, new_df$type)) #comparing the clusters of k-means to actual classes
+print("hierarchical")
+print(table(cut, new_df$type)) #comparing the clusters of hierarchical to actual classes
+}
+```
+
+
+IV. SVM
+
+
+```{r}
+new_df$type=factor(new_df$type,labels=c(0,1))
+
+classifier = svm(formula = type ~.,
+                 data = new_df,
+                 type = 'C-classification',
+                 kernel = 'linear',scale=TRUE)
+print(classifier)
+```
+A training accuracy of 100% is reached using svm.
+
+```{r}
+probs <- predict(classifier, newdata = new_df,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs ==1] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=factor(new_df$type,labels=c('HCC','normal')))
+t
+```
+The testing accuracy is also shown to be in the order of 95% (both repeatedcv and the validation set approaches are used)
+
+```{r}
+new_df = new_df %>%
+  dplyr::mutate(id=row_number())
+
+training = new_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(new_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+new_df=new_df[-ncol(new_df)]
+```
+
+```{r}
+classifier = svm(formula = type ~.,
+                 data = training,
+                 type = 'C-classification',
+                 kernel = 'linear',scale=TRUE)
+probs <- predict(classifier, newdata = testing,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs ==1] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=factor(testing$type,labels=c('HCC','normal')))
+t
+```
+```{r}
+train_control <- trainControl(method = "repeatedcv")
+
+model <- train(type ~., new_df,
+            method = "svmLinear",
+            trControl = train_control)
+
+print(model)
+```
+The corresponding expression values for each of the 37 support vectors can be also examined.
+
+```{r}
+classifier$SV
+```
+A dataset will be created with only 2 of the most important genes (based on Boruta). This allows for better investigation of the svm models.
+
+```{r}
+d = as.data.frame(list(new_df$type,new_df$X218002_s_at,new_df$X220114_s_at))
+colnames(d)[1]='type'
+colnames(d)[2]='gene1'
+colnames(d)[3]='gene2'
+```
+
+The X shapes represent the support vectors.
+It can be noticed that increasing c will generally decrease the number of used support vectors. It will also increase the bias leading to more classifications as can be seen.
+
+```{r}
+c = svm(type~.,d,cost=2)
+length(c$SV)/2 # the number of support vectors
+plot(c,d)
+c = svm(type~.,d,cost=100)
+length(c$SV)/2
+plot(c,d)
+c = svm(type~.,d,cost=100000000)
+length(c$SV)/2
+plot(c,d)
+```
+
+The filled shapes represent the support vectors.
+
+```{r}
+kernfit <- ksvm(type~.,data=d, type = "C-svc", C = 10)
+plot(kernfit,data=d)
+kernfit <- ksvm(type~.,data=d, type = "C-svc", C = 100)
+plot(kernfit,data=d)
+kernfit <- ksvm(type~.,data=d, type = "C-svc", C = 100000000)
+plot(kernfit,data=d)
+```
+On the other hand, it can also be shown that for small values of c, just adding one observation will lead to significant changes in the support vectors. Yet, for large values of c almost no such changes occur (much lower variance)/
+
+```{r}
+kernfit <- ksvm(type~.,data=d[1:(nrow(d)-100),], type = "C-svc", C = 2)
+plot(kernfit,data=d)
+kernfit <- ksvm(type~.,data=d[1:(nrow(d)-99),], type = "C-svc", C = 2)
+plot(kernfit,data=d)
+```
+
+
+```{r}
+kernfit <- ksvm(type~.,data=d[1:(nrow(d)-100),1:3], type = "C-svc", C = 100000000)
+plot(kernfit,data=d[1:3])
+kernfit <- ksvm(type~.,data=d[1:(nrow(d)-99),1:3], type = "C-svc", C = 100000000)
+plot(kernfit,data=d[1:3])
+```
+So it can be generally seen that large values of c will lead to decreased variance with high bias (underfitting).
+Yet, small values of c lead to increased variance with low bias (overfitting). 
+There is no one way to find the optimal c choice.
+
+Next, another type of kernel will be used (radial), and the optimal c value will be chosen based on the tune function.
+
+```{r}
+tune.out <- tune(svm, type~., data = new_df, kernel = "radial",
+                 ranges = list(cost = c(0.1,1,2,5,10,100,1000,10000),
+                 gamma = c(0.5,1,2,3,4)))
+# show best model
+tune.out$best.model
+```
+The best c choice is shown to be 2.
+
+```{r}
+new_df = new_df %>%
+  dplyr::mutate(id=row_number())
+
+training = new_df%>%
+  slice_sample(prop=0.7)
+nrow(training)
+
+testing = anti_join(new_df,training,by='id')
+nrow(testing)
+
+training = training%>%
+  dplyr::select(-id)
+testing = testing%>%
+  dplyr::select(-id)
+new_df=new_df[-ncol(new_df)]
+```
+
+```{r}
+classifierN = svm(formula = type ~.,
+                 data = training,
+                 type = 'C-classification',
+                 kernel = 'radial',scale=TRUE,cost=2)
+probs <- predict(classifier, newdata = testing,type='response')
+pred <- rep("HCC",nrow(testing))
+pred[probs ==1] <- "normal"
+t = confusionMatrix(as.factor(pred), reference=factor(testing$type,labels=c('HCC','normal')))
+t
+```
+A testing accuracy of 100% was used using the radial kernel with cost of 2.
+Using the repeated cv approach does not allow control over the cost parameter, but its results for some c choices are also shown to be almost perfect.
+
+```{r}
+train_control <- trainControl(method = "repeatedcv")
+
+model <- train(type ~., new_df,
+            method = "svmRadial",
+            trControl = train_control)
+
+print(model)
+```
+
+SVM might also be run upon PCA application to allow for visualization of the full model.
+To this end a function is used to extract the PC1 and PC2 values for all observations to create a dataset using them.
+
+```{r}
+pca <- prcomp(new_df[-1],scale=T)
+c1 = as.data.frame(get_pca_ind(pca)[1])[1]
+c2 = as.data.frame(get_pca_ind(pca)[1])[2]
+d = cbind(new_df[1],c1,c2)
+colnames(d)[2]='PC1'
+colnames(d)[3]='PC2'
+```
+
+Both models with linear and radial kernels are shown to have very good seperation of the HCC and normal cases, which explains the high accuracy rates they both resulted in before.
+It can also be noticed that the linear kernel model is more robust and less prone to change with C increase.
+
+```{r}
+pc = svm(formula = type ~.,
+                 data = d,
+                 type = 'C-classification',
+                 kernel = 'radial',scale=TRUE,cost=2)
+plot(pc,d)
+```
+
+
+```{r}
+pc = svm(formula = type ~.,
+                 data = d,
+                 type = 'C-classification',
+                 kernel = 'radial',scale=TRUE,cost=100000)
+plot(pc,d)
+```
+
+```{r}
+pc = svm(formula = type ~.,
+                 data = d,
+                 type = 'C-classification',
+                 kernel = 'linear',scale=TRUE)
+plot(pc,d)
+```
+
+```{r}
+pc = svm(formula = type ~.,
+                 data = d,
+                 type = 'C-classification',
+                 kernel = 'linear',scale=TRUE,cost=100000)
+plot(pc,d)
+```
